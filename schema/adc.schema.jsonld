@@ -1,4 +1,7 @@
 {
+    "$comment": "Audience Data Commons (ADC) data model, version 1.0.0. Property names are mapped in @context onto terms from schema.org (https://schema.org/) and W3C Activity Streams 2.0 (https://www.w3.org/ns/activitystreams#). Property definitions use JSON Schema vocabulary (type, properties, items, required, minimum, maximum, pattern, format) plus one ADC extension, enumFromTaxonomy, which restricts a value to the controlled vocabulary in taxonomies/<name>.json. Consumers that only need the data model can read this file and the taxonomies directly; no tooling is required.",
+    "$id": "https://raw.githubusercontent.com/NPA-AI-Co-Lab/adc-schema/v1.0.0/schema/adc.schema.jsonld",
+    "version": "1.0.0",
     "@context": {
         "@vocab": "https://schema.org/",
         "activitystream": "https://www.w3.org/ns/activitystreams#",

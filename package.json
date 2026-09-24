@@ -1,0 +1,49 @@
+{
+  "name": "@npa-ai-co-lab/adc-schema",
+  "version": "1.0.0",
+  "description": "Audience Data Commons (ADC): the JSON-LD data model and controlled vocabularies for newsroom audience data",
+  "license": "MIT",
+  "homepage": "https://github.com/NPA-AI-Co-Lab/adc-schema#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NPA-AI-Co-Lab/adc-schema.git"
+  },
+  "bugs": {
+    "url": "https://github.com/NPA-AI-Co-Lab/adc-schema/issues"
+  },
+  "keywords": [
+    "audience-data-commons",
+    "adc",
+    "json-ld",
+    "schema",
+    "taxonomy",
+    "controlled-vocabulary",
+    "newsroom",
+    "news-product-alliance"
+  ],
+  "type": "module",
+  "files": [
+    "schema/",
+    "taxonomies/",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "exports": {
+    ".": "./schema/adc.schema.jsonld",
+    "./schema/adc.schema.jsonld": "./schema/adc.schema.jsonld",
+    "./taxonomies/*.json": "./taxonomies/*.json",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "validate": "node scripts/validate.mjs",
+    "test": "node --test",
+    "prepublishOnly": "npm run validate"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
