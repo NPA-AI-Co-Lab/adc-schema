@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-## [1.0.0] - Unreleased
+## [1.0.0] - 2026-09-24
 
 First standalone release of the ADC schema. The data model and taxonomies are identical to those shipped inside the Schema Mapping CLI up to and including its version 2.2.0; this release moves them into their own repository and package so that the standard can be cited, versioned and adopted independently of any one tool.
 
