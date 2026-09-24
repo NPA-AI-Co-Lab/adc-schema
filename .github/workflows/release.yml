@@ -1,0 +1,81 @@
+name: Release
+
+# Runs when a version tag (v1.0.0, v1.2.3, ...) is pushed.
+#
+#   1. validates the schema (same gate as pull requests)
+#   2. refuses to continue unless the tag matches package.json "version"
+#   3. publishes @npa-ai-co-lab/adc-schema to npm (skipped if that version already exists)
+#   4. attaches adc-schema-<version>.zip with the raw schema and taxonomy files
+#      to a GitHub Release, for consumers who do not use npm
+#
+# Required repository secret: NPM_TOKEN - an npm automation token with publish
+# rights on the @npa-ai-co-lab scope.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # create the GitHub Release and upload the asset
+  id-token: write   # npm provenance attestation
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Validate schema and taxonomies
+        run: npm run validate
+
+      - name: Self-test the validator
+        run: npm test
+
+      - name: Check that the tag matches package.json version
+        id: version
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          TAG="${GITHUB_REF_NAME}"
+          if [ "v${VERSION}" != "${TAG}" ]; then
+            echo "::error::tag ${TAG} does not match package.json version ${VERSION}"
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if npm view "@npa-ai-co-lab/adc-schema@${VERSION}" version >/dev/null 2>&1; then
+            echo "@npa-ai-co-lab/adc-schema@${VERSION} is already on npm; skipping publish"
+          else
+            npm publish --provenance --access public
+          fi
+
+      - name: Build release archive
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          zip -r "adc-schema-${VERSION}.zip" schema taxonomies LICENSE README.md CHANGELOG.md
+          unzip -l "adc-schema-${VERSION}.zip"
+
+      - name: Create GitHub Release and attach archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ASSET="adc-schema-${VERSION}.zip"
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "${ASSET}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" "${ASSET}" \
+              --title "ADC schema ${VERSION}" \
+              --generate-notes \
+              --notes "Raw schema and taxonomy files for consumers who do not use npm. The same files are published as \`@npa-ai-co-lab/adc-schema@${VERSION}\`."
+          fi
