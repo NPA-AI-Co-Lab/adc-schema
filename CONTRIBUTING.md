@@ -16,7 +16,7 @@ Removing or renaming a taxonomy value is a breaking change. It is done by adding
 
 ## Before you start
 
-- You need [Node.js](https://nodejs.org/) **18 or newer**. The repository has no dependencies to install.
+- You need [Node.js](https://nodejs.org/) **20 or newer**. The repository has no dependencies to install.
 - Fork the repository and create a branch for your change (`feature/short-description`).
 - Never commit real personal data, not even in examples. Use clearly synthetic values.
 
@@ -27,7 +27,7 @@ npm run validate   # the release gate: schema well-formed, every taxonomy refere
 npm test           # self-test of the validator
 ```
 
-Both must pass locally before you open a pull request; CI runs them on every pull request and blocks merging otherwise. If you changed the validator itself, add or adjust a case in `scripts/validate.test.mjs`.
+Both must pass locally before you open a pull request; CI runs them on every pull request and blocks merging otherwise. `npm run validate` fails on errors only. It also prints warnings: the 1.0.0 schema has a fixed set of them, listed under [Known issues](README.md#known-issues-to-be-addressed-in-11), and `npm test` pins that exact set, so a change that adds a new warning (or fixes a known one) must update `EXPECTED_WARNINGS` in `scripts/validate.test.mjs` and the README. `npm run validate:strict` treats warnings as errors; it is expected to fail until the model revision lands. If you changed the validator itself, add or adjust a case in `scripts/validate.test.mjs`.
 
 ## Submitting a pull request
 
@@ -45,7 +45,7 @@ Both must pass locally before you open a pull request; CI runs them on every pul
 
 ## Releasing
 
-Only maintainers release. A release is a tag `v<version>` on `main` where `<version>` equals the `version` in `package.json` and in the schema. The release workflow validates, publishes `@npa-ai-co-lab/adc-schema` to npm, and attaches `adc-schema-<version>.zip` (schema, taxonomies, licence and docs) to a GitHub Release so that consumers who do not use npm can download the files directly. A tag whose version does not match `package.json` fails the workflow and publishes nothing.
+Only maintainers release. A release is a tag `v<version>` pushed on `main`, where `<version>` equals the `version` in `package.json` and in the schema. CI then publishes it: the release workflow runs `npm run validate` and `npm test`, checks that the tag matches `package.json`, attaches `adc-schema-<version>.zip` (schema, taxonomies, validator, licence and docs) to a GitHub Release, and finally publishes `@npa-ai-co-lab/adc-schema` to npm (pre-release tags such as `v1.1.0-rc.1` go to the `next` dist-tag). A tag whose version does not match `package.json` fails the workflow and publishes nothing. Publishing needs the repository secret `NPM_TOKEN`; if it is missing the workflow fails at the npm step after the GitHub Release is created - add the secret and re-run the workflow for the same tag, which is safe to repeat.
 
 ## Reporting issues
 

@@ -2,8 +2,8 @@
 /**
  * Validates the ADC schema and its taxonomies.
  *
- * This is the release gate: a schema that fails here must never be tagged.
- * It has no dependencies beyond Node.js >= 18.
+ * This is the release gate: a schema with errors here must never be tagged.
+ * It has no dependencies beyond Node.js >= 20.
  *
  * Checks
  *   1. schema/adc.schema.jsonld parses as JSON and is well-formed JSON-LD:
@@ -14,16 +14,32 @@
  *      names one of the entity's own properties.
  *   3. Every property definition has a valid JSON Schema type, arrays have
  *      items, objects have properties, numeric bounds are consistent and
- *      pattern compiles.
+ *      pattern compiles. A `required` array names only properties that
+ *      exist on that node.
  *   4. Every enumFromTaxonomy reference resolves to taxonomies/<name>.json.
  *   5. Every taxonomy file is a non-empty array of { notation, value } with
  *      unique notation and unique value.
- *   6. $id is an absolute URL and version matches package.json.
+ *   6. $id is an absolute URL, the /v<version>/ segment embedded in $id
+ *      equals version, and version matches package.json.
+ *
+ * Checks 1-6 are errors. The following are warnings: they describe known
+ * limitations of the 1.0 data model that are recorded under "Known issues"
+ * in README.md and will be addressed in a model revision.
+ *   7. Every property name has an explicit @context entry, except for the
+ *      schema.org terms in VOCAB_ALLOWED_TERMS that are used through @vocab.
+ *   8. No two properties on the same node resolve to the same IRI once the
+ *      @context is applied (term -> value -> prefix expansion -> @vocab).
+ *   9. Every entity @type is mapped in @context or is a schema.org class in
+ *      VOCAB_ALLOWED_TYPES.
+ *  10. Every @context term (other than a prefix) is used by the schema.
+ *   Also warned: unknown keys, an unreferenced taxonomy file.
  *
  * Usage
- *   node scripts/validate.mjs [--schema <file>] [--taxonomies <dir>] [--package <file>] [--quiet]
+ *   node scripts/validate.mjs [--schema <file>] [--taxonomies <dir>] [--package <file>] [--strict] [--quiet]
  *
- * Exit code 0 when there are no errors, 1 otherwise. Warnings never fail the run.
+ * Exit code 0 when there are no errors, 1 otherwise. Warnings do not fail
+ * the run unless --strict is given (the shipped 1.0.0 schema has known
+ * warnings, so --strict is expected to fail until the model revision).
  */
 
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
@@ -41,6 +57,33 @@ const KNOWN_PROPERTY_KEYS = new Set([
 ]);
 const KNOWN_TOP_LEVEL_KEYS = new Set(['$comment', '$id', 'version', '@context', 'entities']);
 
+/**
+ * Property names that legitimately resolve through @vocab to the schema.org
+ * term of the same name and therefore need no explicit @context entry. Every
+ * other property name must be mapped explicitly, so that a misspelt or
+ * invented name cannot silently become a non-existent schema.org IRI.
+ */
+export const VOCAB_ALLOWED_TERMS = new Set([
+  'addressCountry', 'addressLocality', 'familyName', 'gender', 'givenName', 'location', 'postalCode', 'question',
+]);
+
+/**
+ * Entity @type values that legitimately resolve through @vocab to an existing
+ * schema.org class and therefore need no explicit @context entry.
+ */
+export const VOCAB_ALLOWED_TYPES = new Set(['Person', 'Action']);
+
+/**
+ * Appended to every warning about a known limitation of the 1.0 data model.
+ * These are reported, not enforced: changing the model is out of scope for a
+ * packaging release and is tracked as a separate model revision.
+ */
+export const MODEL_REVISION_NOTE = 'this will be addressed in a model revision; see "Known issues" in README.md';
+
+const USAGE = 'usage: node scripts/validate.mjs [--schema <file>] [--taxonomies <dir>] [--package <file>] [--strict] [--quiet]\n' +
+  '  --strict   treat warnings as errors (non-zero exit code)\n' +
+  '  --quiet    print errors only';
+
 // ---------------------------------------------------------------------------
 
 function parseArgs(argv) {
@@ -49,6 +92,7 @@ function parseArgs(argv) {
     taxonomies: join(ROOT, 'taxonomies'),
     package: join(ROOT, 'package.json'),
     quiet: false,
+    strict: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -56,8 +100,9 @@ function parseArgs(argv) {
     else if (a === '--taxonomies') opts.taxonomies = resolve(argv[++i]);
     else if (a === '--package') opts.package = resolve(argv[++i]);
     else if (a === '--quiet') opts.quiet = true;
+    else if (a === '--strict') opts.strict = true;
     else if (a === '--help' || a === '-h') {
-      console.log('usage: node scripts/validate.mjs [--schema <file>] [--taxonomies <dir>] [--package <file>] [--quiet]');
+      console.log(USAGE);
       process.exit(0);
     } else {
       console.error(`unknown argument: ${a}`);
@@ -91,6 +136,43 @@ function readJson(file, errors, label) {
   }
 }
 
+function termTarget(ctx, term) {
+  const def = ctx[term];
+  if (typeof def === 'string') return def;
+  if (isPlainObject(def) && typeof def['@id'] === 'string') return def['@id'];
+  return undefined;
+}
+
+/**
+ * Resolves a property name to the IRI a JSON-LD processor would use for it,
+ * given a simple @context: term -> its value -> compact-IRI prefix expansion
+ * -> @vocab for anything relative. Keywords (@id, @type, ...) are returned
+ * as they are. Returns undefined when the context is not an object.
+ */
+export function resolveTerm(ctx, name, depth = 0) {
+  if (!isPlainObject(ctx) || typeof name !== 'string') return undefined;
+  if (name.startsWith('@')) return name;
+  const explicit = termTarget(ctx, name);
+  const target = explicit === undefined ? name : explicit;
+  if (target.startsWith('@')) return target;
+  const colon = target.indexOf(':');
+  if (colon > 0) {
+    const prefix = target.slice(0, colon);
+    const suffix = target.slice(colon + 1);
+    if (prefix !== name && !suffix.startsWith('//') && termTarget(ctx, prefix) !== undefined && depth < 8) {
+      const prefixIri = resolveTerm(ctx, prefix, depth + 1);
+      if (isAbsoluteIri(prefixIri)) return prefixIri + suffix;
+    }
+    return target; // absolute IRI, blank node or undefined prefix (reported separately)
+  }
+  // A term whose value is another defined term takes that term's IRI (JSON-LD 1.1 §4.2.2).
+  if (target !== name && termTarget(ctx, target) !== undefined && depth < 8) {
+    return resolveTerm(ctx, target, depth + 1);
+  }
+  const vocab = typeof ctx['@vocab'] === 'string' ? ctx['@vocab'] : '';
+  return vocab + target;
+}
+
 // ---------------------------------------------------------------------------
 
 export function validate(opts) {
@@ -114,6 +196,14 @@ export function validate(opts) {
   if (!isAbsoluteIri(schema.$id)) errors.push('schema: $id must be an absolute URL');
   if (typeof schema.version !== 'string' || !/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(schema.version)) {
     errors.push('schema: version must be a semver string, e.g. "1.0.0"');
+  }
+  if (typeof schema.$id === 'string' && typeof schema.version === 'string') {
+    const m = /\/v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\//.exec(schema.$id);
+    if (!m) {
+      warnings.push('schema: $id does not embed a /v<version>/ path segment; cannot cross-check it against version');
+    } else if (m[1] !== schema.version) {
+      errors.push(`schema: $id embeds version "${m[1]}" but version is "${schema.version}"`);
+    }
   }
   if (existsSync(opts.package)) {
     const pkg = readJson(opts.package, errors, 'package.json');
@@ -168,6 +258,29 @@ export function validate(opts) {
 
   // --- entities and properties -------------------------------------------
   const taxonomyRefs = new Map(); // taxonomy name -> [property paths]
+  const ctxIsObject = isPlainObject(ctx);
+
+  /**
+   * Checks the set of properties that live on one node (an entity's
+   * top-level properties, or the properties of one nested object): every
+   * name is mapped in @context or allow-listed, and no two names resolve
+   * to the same IRI.
+   */
+  function checkNode(properties, path) {
+    if (!ctxIsObject) return;
+    const byIri = new Map(); // iri -> first property name
+    for (const name of Object.keys(properties)) {
+      const explicit = termTarget(ctx, name) !== undefined;
+      if (!explicit && !VOCAB_ALLOWED_TERMS.has(name)) {
+        warnings.push(`model review: property ${path}.${name} has no explicit @context entry and is not an allow-listed schema.org term, so it falls through @vocab to <${resolveTerm(ctx, name)}>; ${MODEL_REVISION_NOTE}`);
+      }
+      const iri = resolveTerm(ctx, name);
+      if (typeof iri !== 'string' || iri.startsWith('@')) continue;
+      if (byIri.has(iri)) {
+        warnings.push(`model review: properties ${path}.${byIri.get(iri)} and ${path}.${name} both map to <${iri}>, so a JSON-LD processor cannot tell them apart; ${MODEL_REVISION_NOTE}`);
+      } else byIri.set(iri, name);
+    }
+  }
 
   function checkProperty(prop, path) {
     stats.properties++;
@@ -189,6 +302,11 @@ export function validate(opts) {
     if (prop.required !== undefined && typeof prop.required !== 'boolean' &&
         !(Array.isArray(prop.required) && prop.required.every((r) => typeof r === 'string'))) {
       errors.push(`schema: property ${path}.required must be a boolean or an array of property names`);
+    } else if (Array.isArray(prop.required)) {
+      const names = isPlainObject(prop.properties) ? prop.properties : {};
+      for (const r of prop.required) {
+        if (!(r in names)) errors.push(`schema: ${path}.required names "${r}" but ${path} has no such property`);
+      }
     }
     if (prop.description !== undefined && typeof prop.description !== 'string') {
       errors.push(`schema: property ${path}.description must be a string`);
@@ -226,6 +344,7 @@ export function validate(opts) {
       if (!isPlainObject(prop.properties)) {
         errors.push(`schema: object property ${path} has no properties`);
       } else {
+        checkNode(prop.properties, path);
         for (const [name, sub] of Object.entries(prop.properties)) checkProperty(sub, `${path}.${name}`);
       }
     }
@@ -251,9 +370,45 @@ export function validate(opts) {
       if (entity.idProp !== undefined && !(entity.idProp in entity.properties)) {
         errors.push(`schema: entity "${name}" idProp "${entity.idProp}" is not one of its properties`);
       }
+      if (ctxIsObject && typeof entity['@type'] === 'string' && termTarget(ctx, entity['@type']) === undefined &&
+          !VOCAB_ALLOWED_TYPES.has(entity['@type']) && !entity['@type'].includes(':')) {
+        warnings.push(`model review: entity "${name}" @type "${entity['@type']}" has no explicit @context entry and is not an allow-listed schema.org class, so it falls through @vocab to <${resolveTerm(ctx, entity['@type'])}>; ${MODEL_REVISION_NOTE}`);
+      }
+      checkNode(entity.properties, name);
       for (const [propName, prop] of Object.entries(entity.properties)) {
         checkProperty(prop, `${name}.${propName}`);
       }
+    }
+  }
+
+  // --- unused @context terms ---------------------------------------------
+  if (ctxIsObject && isPlainObject(entities)) {
+    const used = new Set();
+    const collect = (props) => {
+      if (!isPlainObject(props)) return;
+      for (const [n, p] of Object.entries(props)) {
+        used.add(n);
+        if (isPlainObject(p)) {
+          if (isPlainObject(p.properties)) collect(p.properties);
+          if (isPlainObject(p.items) && isPlainObject(p.items.properties)) collect(p.items.properties);
+        }
+      }
+    };
+    for (const e of Object.values(entities)) {
+      if (!isPlainObject(e)) continue;
+      if (typeof e['@type'] === 'string') used.add(e['@type']);
+      collect(e.properties);
+    }
+    for (const [term, def] of Object.entries(ctx)) {
+      if (term.startsWith('@') || used.has(term)) continue;
+      const target = typeof def === 'string' ? def : isPlainObject(def) ? def['@id'] : undefined;
+      // a prefix (a term mapped to an absolute IRI that other terms use) is not a property
+      const isPrefix = isAbsoluteIri(target) && Object.values(ctx).some((d) => {
+        const t = typeof d === 'string' ? d : isPlainObject(d) ? d['@id'] : undefined;
+        return typeof t === 'string' && t.startsWith(`${term}:`);
+      });
+      if (isPrefix) continue;
+      warnings.push(`model review: @context term "${term}" is declared but no entity or property uses it; ${MODEL_REVISION_NOTE}`);
     }
   }
 
@@ -332,7 +487,12 @@ function main() {
     console.error(`\nFAILED: ${errors.length} error(s), ${warnings.length} warning(s)`);
     process.exit(1);
   }
-  if (!opts.quiet) console.log(`\nOK: 0 errors, ${warnings.length} warning(s)`);
+  if (opts.strict && warnings.length > 0) {
+    if (opts.quiet) for (const w of warnings) console.error(`  warning: ${w}`);
+    console.error(`\nFAILED (--strict): 0 errors, ${warnings.length} warning(s)`);
+    process.exit(1);
+  }
+  if (!opts.quiet) console.log(`\nOK: 0 errors, ${warnings.length} warning(s)${opts.strict ? ' (strict)' : ''}`);
 }
 
 const isDirectRun = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);

@@ -1,19 +1,29 @@
 name: Release
 
-# Runs when a version tag (v1.0.0, v1.2.3, ...) is pushed.
+# Runs when a version tag (v1.0.0, v1.2.3, v1.1.0-rc.1, ...) is pushed, or on
+# manual dispatch from a tag.
 #
-#   1. validates the schema (same gate as pull requests)
+#   1. validates the schema (same gate as pull requests: errors fail, the
+#      known model-review warnings listed in README.md do not)
 #   2. refuses to continue unless the tag matches package.json "version"
-#   3. publishes @npa-ai-co-lab/adc-schema to npm (skipped if that version already exists)
-#   4. attaches adc-schema-<version>.zip with the raw schema and taxonomy files
-#      to a GitHub Release, for consumers who do not use npm
+#   3. builds adc-schema-<version>.zip with the schema, taxonomies, validator,
+#      licence and docs
+#   4. creates the GitHub Release and attaches the zip (a tag containing "-"
+#      is marked as a pre-release)
+#   5. last, publishes @npa-ai-co-lab/adc-schema to npm (a tag containing "-"
+#      goes to the "next" dist-tag)
 #
-# Required repository secret: NPM_TOKEN - an npm automation token with publish
-# rights on the @npa-ai-co-lab scope.
+# npm publishing is required. Repository secret: NPM_TOKEN - an npm automation
+# token with publish rights on the @npa-ai-co-lab scope. If it is missing the
+# job fails at the publish step, after the GitHub Release exists; add the
+# secret and re-run the workflow from the same tag. Re-runs are idempotent:
+# the release asset is re-uploaded with --clobber and a version that is
+# already on npm is not published again.
 
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: write   # create the GitHub Release and upload the asset
@@ -23,6 +33,17 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
+      - name: Require a tag ref
+        run: |
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "::error::this workflow releases from a tag; it was run from ${GITHUB_REF} (${GITHUB_REF_TYPE}). Re-run it choosing a v* tag under 'Use workflow from', or push a tag."
+            exit 1
+          fi
+          case "${GITHUB_REF_NAME}" in
+            v*) ;;
+            *) echo "::error::tag ${GITHUB_REF_NAME} is not a version tag (v<semver>)"; exit 1 ;;
+          esac
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
@@ -46,36 +67,54 @@ jobs:
             exit 1
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-
-      - name: Publish to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          if npm view "@npa-ai-co-lab/adc-schema@${VERSION}" version >/dev/null 2>&1; then
-            echo "@npa-ai-co-lab/adc-schema@${VERSION} is already on npm; skipping publish"
-          else
-            npm publish --provenance --access public
-          fi
+          case "${TAG}" in
+            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
 
       - name: Build release archive
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          zip -r "adc-schema-${VERSION}.zip" schema taxonomies LICENSE README.md CHANGELOG.md
+          zip -r "adc-schema-${VERSION}.zip" schema taxonomies scripts LICENSE README.md CHANGELOG.md
           unzip -l "adc-schema-${VERSION}.zip"
 
       - name: Create GitHub Release and attach archive
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
         run: |
           ASSET="adc-schema-${VERSION}.zip"
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" "${ASSET}" --clobber
           else
+            EXTRA=()
+            if [ "${PRERELEASE}" = "true" ]; then EXTRA+=(--prerelease); fi
             gh release create "${GITHUB_REF_NAME}" "${ASSET}" \
               --title "ADC schema ${VERSION}" \
               --generate-notes \
-              --notes "Raw schema and taxonomy files for consumers who do not use npm. The same files are published as \`@npa-ai-co-lab/adc-schema@${VERSION}\`."
+              --notes "Schema, taxonomies, validator and docs for version ${VERSION}. Install with \`npm install @npa-ai-co-lab/adc-schema@${VERSION}\`, unzip this archive, or fetch the raw files at \`https://raw.githubusercontent.com/NPA-AI-Co-Lab/adc-schema/v${VERSION}/\`." \
+              "${EXTRA[@]}"
+          fi
+
+      - name: Publish to npm
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          if npm view "@npa-ai-co-lab/adc-schema@${VERSION}" version >/dev/null 2>&1; then
+            echo "@npa-ai-co-lab/adc-schema@${VERSION} is already on npm; skipping publish"
+            exit 0
+          fi
+          if [ -z "${NPM_TOKEN}" ]; then
+            echo "::error::NPM_TOKEN secret is not set, so @npa-ai-co-lab/adc-schema@${VERSION} was NOT published to npm. The GitHub Release ${GITHUB_REF_NAME} and its zip already exist. Add an npm automation token with publish rights on @npa-ai-co-lab as the repository secret NPM_TOKEN (Settings > Secrets and variables > Actions), then re-run this workflow for tag ${GITHUB_REF_NAME} (Re-run jobs, or Run workflow choosing the tag). The re-run is safe: the release asset is replaced and npm publish runs."
+            exit 1
+          fi
+          if [ "${PRERELEASE}" = "true" ]; then
+            npm publish --provenance --access public --tag next
+          else
+            npm publish --provenance --access public
           fi
